@@ -139,6 +139,9 @@ class Slave:
     def close(self):
         self.daemon.shutdown()
 
+    def respond(self):
+        return True
+
 
 def main(args):
     try:

@@ -725,6 +725,11 @@ class Master:
         # become a server socket
         self.command_socket.listen(5)
 
+        # set up the continuous connection thread
+        print("Create continuous connection thread")
+        con_thread = threading.Thread(target=self.continuous_connection, daemon=True)
+        con_thread.start()
+
         # ready to begin normal execution
         self.ready = True
 
@@ -742,29 +747,26 @@ class Master:
 
     def check_connection(self, node):
         try:
-            node.socket_lock.acquire()
-            # send connect command
-            node.socket.sendall(util.s_to_bytes("OPEN"))
-            ready = select.select([node.socket], [], [], util.master_continuous_wait)
-            if ready[0]:
-                response = util.s_from_bytes(node.socket.recv(util.bufsize))
+            if node.daemon.respond():
+                return
             else:
-                response = "FAIL"
-
-            node.socket_lock.release()
-
-            if response != "OPEN":
-                raise socket.error("invalid response")
-        except socket.error:
+                raise Exception("Unreachable node")
+        except Exception:
             # give it time to reconnect/recover
             node.status = "recovery"
             print("Recovery mode")
 
-            # close the socket so the client can attempt to reconnect
-            node.socket.shutdown(socket.SHUT_RDWR)
-            node.socket.close()
-
             time.sleep(util.slave_reconnect_window)
+
+            try:
+                if node.daemon.respond():
+                    node.status = "connected"
+                else:
+                    raise Exception("Unreachable node")
+            except Exception:
+                None
+
+            # if it still hasn't reconnected, then we assume it's lost
             if node.status == "recovery":
                 self.lose_node(node)
 
