@@ -21,6 +21,7 @@ class Slave:
         self.storage_space = 0
         self.storage_loc = ""
         self.daemon = None
+        self.ip = None
 
         # if all params are None then read from a config file
         if address is None and port is None and storage_space is None and storage_loc is None:
@@ -47,6 +48,10 @@ class Slave:
         # initial connection protocol
         self.socket.sendall(util.i_to_bytes(self.id))
         self.id = util.i_from_bytes(self.socket.recv(util.bufsize))
+        self.socket.sendall(util.s_to_bytes("OK"))
+
+        # get my public ip
+        self.ip = util.s_from_bytes(self.socket.recv(util.bufsize))
 
         self._write_config_settings()
 
@@ -143,7 +148,7 @@ def main(args):
         else:
             slave = Slave()
 
-        with Pyro4.Daemon(host=socket.gethostbyname(socket.getfqdn())) as daemon:
+        with Pyro4.Daemon(host=slave.ip) as daemon:
             uri = daemon.register(slave)
             slave.daemon = daemon
             slave.send_daemon_uri(str(uri))

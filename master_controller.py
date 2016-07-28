@@ -942,6 +942,9 @@ class Master:
         """
         # send id to the node
         connection_info.socket.sendall(util.i_to_bytes(node.id))
+        response = connection_info.socket.recv(util.bufsize)
+        # send the node it's public ip address
+        connection_info.socket.sendall(util.s_to_bytes(connection_info.address[0]))
         # get the uri of the node
         uri = util.s_from_bytes(connection_info.socket.recv(util.bufsize))
         # create the proxy daemon
