@@ -945,10 +945,14 @@ class Master:
         # send id to the node
         connection_info.socket.sendall(util.i_to_bytes(node.id))
         response = connection_info.socket.recv(util.bufsize)
-        # send the node it's public ip address
+        # send the node its public ip address
         connection_info.socket.sendall(util.s_to_bytes(connection_info.address[0]))
-        # get the uri of the node
-        uri = util.s_from_bytes(connection_info.socket.recv(util.bufsize))
+        response = connection_info.socket.recv(util.bufsize)
+        # send the node its external port
+        connection_info.socket.sendall(util.i_to_bytes(connection_info.address[1]))
+        # set the uri of the node
+        uri = "PYRO:node" + str(node.id) + "@" + connection_info.address[0] + ":" + str(connection_info.address[1])
+        time.sleep(1)
         # create the proxy daemon
         node.daemon = Pyro4.Proxy(uri)
         # get the storage space

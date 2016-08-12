@@ -21,7 +21,9 @@ class Slave:
         self.storage_space = 0
         self.storage_loc = ""
         self.daemon = None
-        self.ip = None
+        self.natip = None
+        self.natport = None
+        self.inport = None
 
         # if all params are None then read from a config file
         if address is None and port is None and storage_space is None and storage_loc is None:
@@ -50,8 +52,18 @@ class Slave:
         self.id = util.i_from_bytes(self.socket.recv(util.bufsize))
         self.socket.sendall(util.s_to_bytes("OK"))
 
-        # get my public ip
-        self.ip = util.s_from_bytes(self.socket.recv(util.bufsize))
+        # get my external ip
+        self.natip = util.s_from_bytes(self.socket.recv(util.bufsize))
+        self.socket.sendall(util.s_to_bytes("OK"))
+        # get my external port
+        self.natport = util.i_from_bytes(self.socket.recv(util.bufsize))
+
+        # get my internal port
+        self.inport = self.socket.getsockname()[1]
+
+        # close the socket
+        self.socket.shutdown(socket.SHUT_RDWR)
+        self.socket.close()
 
         self._write_config_settings()
 
@@ -151,11 +163,29 @@ def main(args):
         else:
             slave = Slave()
 
-        with Pyro4.Daemon(host=slave.ip) as daemon:
-            uri = daemon.register(slave)
+        print(slave.natip)
+        print(str(slave.natport))
+        print(str(slave.inport))
+
+        with Pyro4.Daemon(nathost=slave.natip, natport=slave.natport, port=slave.inport) as daemon:
+            uri = daemon.register(slave, "node" + str(slave.id))
             slave.daemon = daemon
-            slave.send_daemon_uri(str(uri))
+            # slave.send_daemon_uri(str(uri))
             daemon.requestLoop()
+
+        # if both ports are the same, then there isn't a nat being used
+        # if slave.natport == slave.inport:
+        #     with Pyro4.Daemon(port=slave.inport, host=slave.natip) as daemon:
+        #         uri = daemon.register(slave, "node" + str(slave.id))
+        #         slave.daemon = daemon
+        #         # slave.send_daemon_uri(str(uri))
+        #         daemon.requestLoop()
+        # else:
+        #     with Pyro4.Daemon(nathost=slave.natip, natport=slave.natport, port=slave.inport) as daemon:
+        #         uri = daemon.register(slave, "node" + str(slave.id))
+        #         slave.daemon = daemon
+        #         # slave.send_daemon_uri(str(uri))
+        #         daemon.requestLoop()
 
     except Exception as e:
         print(str(e))
