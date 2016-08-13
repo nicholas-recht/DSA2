@@ -16,10 +16,29 @@ def main(args):
     elif len(args) == 3:
         command = args[1]
         param = args[2]
+
         s = socket.create_connection(("localhost", util.command_port))
         s.sendall(util.s_to_bytes(command))
+
         res = s.recv(util.bufsize)
         s.sendall(util.s_to_bytes(param))
+
+        s.close()
+
+    elif len(args) == 4:
+        command = args[1]
+        param = args[2]
+        param2 = args[3]
+
+        s = socket.create_connection(("localhost", util.command_port))
+        s.sendall(util.s_to_bytes(command))
+
+        res = s.recv(util.bufsize)
+        s.sendall(util.s_to_bytes(param))
+
+        res = s.recv(util.bufsize)
+        s.sendall(util.s_to_bytes(param2))
+
         s.close()
 
     else:
@@ -35,7 +54,10 @@ def main(args):
               "\n\tupload [path/to/file]"
               "\n\tdownload [file_id]"
               "\n\tdelete [file_id]"
-              "\n\tsearch [query]")
+              "\n\tsearch [query]"
+              "\n\tadd_node [ip_address] [port]"
+              "\n\tretry_node [node_id]")
+
         sys.exit()
 
 if __name__ == "__main__":

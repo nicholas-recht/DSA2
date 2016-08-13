@@ -4,7 +4,6 @@ import threading
 import sqlite3
 import os
 import time
-import select
 import datetime
 import math
 import base64
@@ -30,9 +29,16 @@ class SlaveNode:
         self.status = "not_set"
         self.daemon = None
         self.address = None
+        self.port = None
 
     def to_string(self):
-        return str(self.id) + " " + str(self.storage_space) + " " + str(self.address)
+        return str(self.id) + " " + str(self.storage_space) + " " + str(self.address) + ' ' + str(self.port)
+
+    def get_uri(self):
+        return "PYRO:node@" + self.address + ":" + str(self.port)
+
+    def get_daemon(self):
+        self.daemon = Pyro4.Proxy(self.get_uri())
 
     @staticmethod
     def get_slave_nodes(status=None):
@@ -53,6 +59,8 @@ class SlaveNode:
             node.id = row[0]
             node.storage_space = row[1]
             node.status = row[2]
+            node.address = row[3]
+            node.port = row[4]
             nodes.append(node)
 
         conn.close()
@@ -75,6 +83,8 @@ class SlaveNode:
             node.id = row[0]
             node.storage_space = row[1]
             node.status = row[2]
+            node.address = row[3]
+            node.port = row[4]
 
         conn.close()
 
@@ -86,11 +96,13 @@ class SlaveNode:
         conn = sqlite3.connect(util.database)
         c = conn.cursor()
 
-        params = (node.status, node.storage_space, node.id)
+        params = (node.status, node.storage_space, node.address, node.port, node.id)
 
         c.execute('''UPDATE tbl_slave_node SET
                      status = ?,
-                     storage_space = ?
+                     storage_space = ?,
+                     address = ?,
+                     port = ?
                      WHERE id = ?''', params)
         conn.commit()
         conn.close()
@@ -101,13 +113,17 @@ class SlaveNode:
         conn = sqlite3.connect(util.database)
         c = conn.cursor()
 
-        params = (node.status, node.storage_space)
+        params = (node.status, node.storage_space, node.address, node.port)
 
         c.execute('''INSERT INTO tbl_slave_node
                      (status,
-                      storage_space)
+                      storage_space,
+                      address,
+                      port)
                      VALUES
                      (?,
+                      ?,
+                      ?,
                       ?)''', params)
         node.id = c.lastrowid
         conn.commit()
@@ -686,35 +702,23 @@ class Master:
         self.nodes_lock = threading.Lock()
 
         # check if an existing database already exists
+        nodes = []
         if not os.path.isfile(util.database):
             print("First time setup")
             self.setup_db()
 
         else:
-            connected_nodes = SlaveNode.get_slave_nodes("connected")
-            self.nodes = connected_nodes
-
-        # set up the welcoming socket for new threads
-        print("Create welcome thread")
-        welcome_activity = WelcomeSocket(new_client_callback=self.accept_new_node)
-        welcome_thread = threading.Thread(target=welcome_activity.open_welcome_conn, daemon=True)
-        welcome_thread.start()
+            nodes = SlaveNode.get_slave_nodes("connected")
 
         # start the synchronization period for already connected nodes
         print("Start synchronization period")
-        wait_time = util.restart_window
-        while len([x for x in self.nodes if x.status == "connected"]) > 0 and wait_time > 0:
-            wait_time -= util.wait_interval
-            time.sleep(util.wait_interval)
-        print("End synchronization period")
+        for node in nodes:
+            try:
+                self.connect_to_node(node)
 
-        # get our set of nodes to start with
-        for node in self.nodes:
-            if node.status == "connected":  # node never reconnected, is now lost
+            except Exception as e:
                 self.lose_node(node)
-            else:  # either it's a new node, or an existing one that has reconnected
-                node.status = "connected"
-                SlaveNode.update_slave_node(node)
+        print("End synchronization period")
 
         # set up command socket
         # create an INET, STREAMing socket
@@ -768,16 +772,13 @@ class Master:
 
             # if it still hasn't reconnected, then we assume it's lost
             if node.status == "recovery":
+                self.remove_from_connection_nodes(node)
                 self.lose_node(node)
+            else:
+                print("Recovered")
 
     def lose_node(self, node):
         node.status = "lost"
-
-        # remove the node from the array
-        self.nodes_lock.acquire()
-        self.nodes.remove(node)
-        self.nodes_lock.release()
-
         SlaveNode.update_slave_node(node)
 
         print("Node lost")
@@ -914,17 +915,17 @@ class Master:
                 file.status = "danger"
                 File.update_file(file)
 
-    def accept_new_node(self, node):
-        # kick off a new thread to handle the initial handshake
-        handshake_thread = threading.Thread(target=self.handshake_node, args=(node,))
-        handshake_thread.start()
+    # def accept_new_node(self, node):
+    #     # kick off a new thread to handle the initial handshake
+    #     handshake_thread = threading.Thread(target=self.handshake_node, args=(node,))
+    #     handshake_thread.start()
 
-    def create_new_node(self):
-        node = SlaveNode()
-        node.status = "connected"
-        SlaveNode.insert_slave_node(node)
-
-        return node
+    # def create_new_node(self):
+    #     node = SlaveNode()
+    #     node.status = "connected"
+    #     SlaveNode.insert_slave_node(node)
+    #
+    #     return node
 
     def add_to_connection_nodes(self, node):
         # add the node to the list of nodes
@@ -935,85 +936,91 @@ class Master:
         # UNLOCK
         self.nodes_lock.release()
 
-    def connect_node_daemon(self, node, connection_info):
-        """
-        This function should be run in it's own thread
-        :param node:
-        :param connection_info:
-        :return:
-        """
-        # send id to the node
-        connection_info.socket.sendall(util.i_to_bytes(node.id))
-        response = connection_info.socket.recv(util.bufsize)
-        # send the node its public ip address
-        connection_info.socket.sendall(util.s_to_bytes(connection_info.address[0]))
-        response = connection_info.socket.recv(util.bufsize)
-        # send the node its external port
-        connection_info.socket.sendall(util.i_to_bytes(connection_info.address[1]))
-        # set the uri of the node
-        uri = "PYRO:node" + str(node.id) + "@" + connection_info.address[0] + ":" + str(connection_info.address[1])
-        time.sleep(1)
-        # create the proxy daemon
-        node.daemon = Pyro4.Proxy(uri)
-        # get the storage space
-        node.storage_space = node.daemon.get_storage_space()
-        # set the ip address param
-        node.address = connection_info.address
-        # close the socket since it isn't needed anymore
-        connection_info.socket.shutdown(socket.SHUT_RDWR)
-        connection_info.socket.close()
+    def remove_from_connection_nodes(self, node):
+        # remove the node from the array
+        self.nodes_lock.acquire()
+        self.nodes.remove(node)
+        self.nodes_lock.release()
 
-    def handshake_node(self, connection_info):
-        """
-        This function should be run in it's own thread.
-        :param connection_info:
-        :return:
-        """
-        id = util.i_from_bytes(connection_info.socket.recv(util.bufsize))
-
-        node = SlaveNode.get_slave_node(id)
-        if node is None:
-            node = self.create_new_node()
-            self.connect_node_daemon(node, connection_info)
-            node.status = "connected"
-            SlaveNode.update_slave_node(node)
-            self.add_to_connection_nodes(node)
-
-            if not self.ready:
-                node.status = "new"
-
-            print("New node connected")
-        else:
-            if node.status == "lost":  # the prodigal son has returned!
-                self.connect_node_daemon(node, connection_info)
-                self.recover_node(node)
-                node.status = "connected"
-                SlaveNode.update_slave_node(node)
-                self.add_to_connection_nodes(node)
-
-                print("Lost node connected")
-            else:
-                node = self.get_connected_node(id)
-
-                if node.status == "recovery":  # good to go
-                    self.connect_node_daemon(node, connection_info)
-                    self.recover_node(node)
-                    node.status = "connected"
-                    SlaveNode.update_slave_node(node)
-                    print("Recovered node connected")
-                else:
-                    if self.ready:
-                        # why are we getting a new connection?? We assume it's an impostor
-                        node = self.create_new_node()
-                        self.connect_node_daemon(node, connection_info)
-                        node.status = "connected"
-                        SlaveNode.update_slave_node(node)
-                        self.add_to_connection_nodes(node)
-                        print("Impostor node connected")
-                    else:
-                        self.connect_node_daemon(node, connection_info)
-                        node.status = "restart"
-                        print("Existing node connected")
+    # def connect_node_daemon(self, node, connection_info):
+    #     """
+    #     This function should be run in it's own thread
+    #     :param node:
+    #     :param connection_info:
+    #     :return:
+    #     """
+    #     # send id to the node
+    #     connection_info.socket.sendall(util.i_to_bytes(node.id))
+    #     response = connection_info.socket.recv(util.bufsize)
+    #     # send the node its public ip address
+    #     connection_info.socket.sendall(util.s_to_bytes(connection_info.address[0]))
+    #     response = connection_info.socket.recv(util.bufsize)
+    #     # send the node its external port
+    #     connection_info.socket.sendall(util.i_to_bytes(connection_info.address[1]))
+    #     # set the uri of the node
+    #     uri = "PYRO:node" + str(node.id) + "@" + connection_info.address[0] + ":" + str(connection_info.address[1])
+    #     time.sleep(1)
+    #     # create the proxy daemon
+    #     node.daemon = Pyro4.Proxy(uri)
+    #     # get the storage space
+    #     node.storage_space = node.daemon.get_storage_space()
+    #     # set the ip address param
+    #     node.address = connection_info.address
+    #     # close the socket since it isn't needed anymore
+    #     connection_info.socket.shutdown(socket.SHUT_RDWR)
+    #     connection_info.socket.close()
+    #
+    # def handshake_node(self, connection_info):
+    #     """
+    #     This function should be run in it's own thread.
+    #     :param connection_info:
+    #     :return:
+    #     """
+    #     id = util.i_from_bytes(connection_info.socket.recv(util.bufsize))
+    #
+    #     node = SlaveNode.get_slave_node(id)
+    #     if node is None:
+    #         node = self.create_new_node()
+    #         self.connect_node_daemon(node, connection_info)
+    #         node.status = "connected"
+    #         SlaveNode.update_slave_node(node)
+    #         self.add_to_connection_nodes(node)
+    #
+    #         if not self.ready:
+    #             node.status = "new"
+    #
+    #         print("New node connected")
+    #     else:
+    #         if node.status == "lost":  # the prodigal son has returned!
+    #             self.connect_node_daemon(node, connection_info)
+    #             self.recover_node(node)
+    #             node.status = "connected"
+    #             SlaveNode.update_slave_node(node)
+    #             self.add_to_connection_nodes(node)
+    #
+    #             print("Lost node connected")
+    #         else:
+    #             node = self.get_connected_node(id)
+    #
+    #             if node.status == "recovery":  # good to go
+    #                 self.connect_node_daemon(node, connection_info)
+    #                 self.recover_node(node)
+    #                 node.status = "connected"
+    #                 SlaveNode.update_slave_node(node)
+    #                 print("Recovered node connected")
+    #             else:
+    #                 if self.ready:
+    #                     # why are we getting a new connection?? We assume it's an impostor
+    #                     node = self.create_new_node()
+    #                     self.connect_node_daemon(node, connection_info)
+    #                     node.status = "connected"
+    #                     SlaveNode.update_slave_node(node)
+    #                     self.add_to_connection_nodes(node)
+    #                     print("Impostor node connected")
+    #                 else:
+    #                     self.connect_node_daemon(node, connection_info)
+    #                     node.status = "restart"
+    #                     print("Existing node connected")
 
     def get_connected_node(self, id):
         matches = [x for x in self.nodes if x.id == id]
@@ -1045,7 +1052,9 @@ class Master:
         c.execute('''CREATE TABLE tbl_slave_node
                       (id INTEGER NOT NULL PRIMARY KEY,
                        storage_space BIGINT NOT NULL,
-                       status TEXT)''')
+                       status TEXT,
+                       address TEXT NOT NULL,
+                       port INTEGER NOT NULL)''')
 
         c.execute(('''CREATE TABLE tbl_file_part
                       (id INTEGER NOT NULL PRIMARY KEY,
@@ -1401,6 +1410,43 @@ class Master:
             self.command_thread = threading.Thread(target=self.command_loop, daemon=True)
             self.command_thread.start()
 
+    def connect_to_node(self, node):
+        try:
+            node.get_daemon()
+            node.storage_space = node.daemon.get_storage_space()
+            node.status = "connected"
+
+            SlaveNode.update_slave_node(node)
+            self.add_to_connection_nodes(node)
+
+        except Exception as e:
+            raise e
+
+    def add_node(self, address, port):
+        try:
+            node = SlaveNode()
+            node.address = address
+            node.port = port
+            node.status = "lost"
+            SlaveNode.insert_slave_node(node)
+
+            self.connect_to_node(node)
+
+        except Exception as e:
+            raise e
+
+    def retry_node_connect(self, id):
+        node = SlaveNode.get_slave_node(id)
+
+        if node is not None:
+            if node.status != "lost":
+                raise Exception("The given node is already connected")
+            else:
+                self.connect_to_node(node)
+                self.recover_node(node)
+        else:
+            raise Exception("The given node doesn't exist")
+
     def command_loop(self):
         # main process loop - listen for commands
         while True:
@@ -1480,6 +1526,27 @@ class Master:
                         print(file.name)
 
                     print("Search complete")
+
+                elif command == "add_node":
+                    print("Add node command received")
+                    client_socket.sendall(util.s_to_bytes("OK"))
+                    address = util.s_from_bytes(client_socket.recv(util.bufsize))
+
+                    client_socket.sendall(util.s_to_bytes("OK"))
+                    port = int(util.s_from_bytes(client_socket.recv(util.bufsize)))
+
+                    self.add_node(address, port)
+
+                    print("new node added")
+
+                elif command == "retry_node":
+                    print("Retry node command received")
+                    client_socket.sendall(util.s_to_bytes("OK"))
+                    id = int(util.s_from_bytes(client_socket.recv(util.bufsize)))
+
+                    self.retry_node_connect(id)
+
+                    print("Node connected")
 
                 else:
                     print("Unrecognized command")

@@ -1,7 +1,5 @@
 import os
 import sys
-import socket
-import time
 import Pyro4
 import base64
 if __name__ == "__main__":
@@ -9,88 +7,50 @@ if __name__ == "__main__":
 else:
     from . import util
 
+# The node reads a configuration file in the format of:
+# storage_space
+# storage_loc
+# ip_address
+# port
+# nat[true/false]
+# [nat_ip_address]
+# [nat_port]
 
 @Pyro4.expose
 class Slave:
-    def __init__(self, address=None, port=None, storage_space=None, storage_loc=None):
+    def __init__(self):
         # member variables
-        self.id = -1
-        self.socket = None
         self.address = None
         self.port = 0
         self.storage_space = 0
         self.storage_loc = ""
         self.daemon = None
-        self.natip = None
-        self.natport = None
-        self.inport = None
+        self.nat_address = None
+        self.nat_port = None
+        self.nat = False
 
-        # if all params are None then read from a config file
-        if address is None and port is None and storage_space is None and storage_loc is None:
-            self._read_config_settings()
-        else:
-            self.address = address
-            self.port = port
-            self.storage_space = storage_space
-            self.storage_loc = storage_loc
-
-            self._write_config_settings()
-
-        # continually try and create the connection until successful
-        while True:
-            try:
-                self.socket = socket.create_connection((self.address, self.port), util.slave_connect_timeout)
-                self.socket.settimeout(None)
-                break
-            except socket.error as e:
-                print(str(e))
-                time.sleep(util.slave_connect_wait)
-        print("Connection established")
-
-        # initial connection protocol
-        self.socket.sendall(util.i_to_bytes(self.id))
-        self.id = util.i_from_bytes(self.socket.recv(util.bufsize))
-        self.socket.sendall(util.s_to_bytes("OK"))
-
-        # get my external ip
-        self.natip = util.s_from_bytes(self.socket.recv(util.bufsize))
-        self.socket.sendall(util.s_to_bytes("OK"))
-        # get my external port
-        self.natport = util.i_from_bytes(self.socket.recv(util.bufsize))
-
-        # get my internal port
-        self.inport = self.socket.getsockname()[1]
-
-        # close the socket
-        self.socket.shutdown(socket.SHUT_RDWR)
-        self.socket.close()
-
-        self._write_config_settings()
-
-    def send_daemon_uri(self, uri):
-        self.socket.sendall(util.s_to_bytes(uri))
+        # get config settings
+        self._read_config_settings()
 
     def _read_config_settings(self):
         if not os.path.isfile(util.config_file):
             raise FileExistsError()
         file = open(util.config_file, "r")
 
-        self.address = file.readline().replace("\n", "")
-        self.port = int(file.readline().replace("\n", ""))
         self.storage_space = int(file.readline().replace("\n", ""))
         self.storage_loc = file.readline().replace("\n", "")
-        self.id = int(file.readline().replace("\n", ""))
+        self.address = file.readline().replace("\n", "")
+        self.port = int(file.readline().replace("\n", ""))
 
-        file.close()
+        # nat settings
+        nat = file.readline().replace("\n", "")
 
-    def _write_config_settings(self):
-        file = open(util.config_file, "w")
-
-        file.write(self.address + "\n")
-        file.write(str(self.port) + "\n")
-        file.write(str(self.storage_space) + "\n")
-        file.write(self.storage_loc + "\n")
-        file.write(str(self.id) + "\n")
+        if nat.lower() == "true":
+            self.nat = True
+            self.nat_address = file.readline().replace("\n", "")
+            self.nat_port = int(file.readline().replace("\n", ""))
+        else:
+            self.nat = False
 
         file.close()
 
@@ -157,35 +117,17 @@ class Slave:
 
 def main(args):
     try:
-        # set up the master controller
-        if len(args) > 1:
-            slave = Slave(args[1], int(args[2]), int(args[3]), args[4])
-        else:
-            slave = Slave()
+        slave = Slave()
 
-        print(slave.natip)
-        print(str(slave.natport))
-        print(str(slave.inport))
-
-        with Pyro4.Daemon(nathost=slave.natip, natport=slave.natport, port=slave.inport) as daemon:
-            uri = daemon.register(slave, "node" + str(slave.id))
+        print("Start daemon")
+        with Pyro4.Daemon(nathost=slave.nat_address, natport=slave.nat_port,
+                          port=slave.port, host=slave.address) \
+                if slave.nat else \
+                Pyro4.Daemon(port=slave.port, host=slave.address) as daemon:
+            uri = daemon.register(slave, "node")
             slave.daemon = daemon
-            # slave.send_daemon_uri(str(uri))
+            print("Daemon started")
             daemon.requestLoop()
-
-        # if both ports are the same, then there isn't a nat being used
-        # if slave.natport == slave.inport:
-        #     with Pyro4.Daemon(port=slave.inport, host=slave.natip) as daemon:
-        #         uri = daemon.register(slave, "node" + str(slave.id))
-        #         slave.daemon = daemon
-        #         # slave.send_daemon_uri(str(uri))
-        #         daemon.requestLoop()
-        # else:
-        #     with Pyro4.Daemon(nathost=slave.natip, natport=slave.natport, port=slave.inport) as daemon:
-        #         uri = daemon.register(slave, "node" + str(slave.id))
-        #         slave.daemon = daemon
-        #         # slave.send_daemon_uri(str(uri))
-        #         daemon.requestLoop()
 
     except Exception as e:
         print(str(e))
