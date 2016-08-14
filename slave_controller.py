@@ -90,18 +90,19 @@ class Slave:
 
     def _file_contains_substring(self, path, substr):
         try:
-            file = open(self.storage_loc + '/' + path, mode='rb')
-            f = file.read()
+            with open(self.storage_loc + '/' + path, mode='rb') as file:
+                f = file.read()
 
-            if f.find(substr) != -1:
-                return True
-            else:
-                return False
+                if f.find(substr) != -1:
+                    return True
+                else:
+                    return False
 
         except Exception as e:
             return False
 
-    def search_files(self, search_string):
+    def search_files(self, params):
+        search_string = base64.b64decode(params["data"])
         files = os.listdir(self.storage_loc)
 
         matching = [file for file in files if (self._file_contains_substring(file, search_string))]
